@@ -39,13 +39,28 @@ data class UiState(
     val quiz: QuizState? = null,
     val listenedSec: Int = 0,
     val baseWpm: Float = 0f,
+    val mood: String = "calm",
+    val hook: HookCard? = null,
+    val micro: MicroState? = null,
+    val microSec: Int = 0,
+    val combo: Int = 0,
+    val episodeDone: EpisodeSummary? = null,
 )
+
+/** Карточка-крючок перед серией. */
+data class HookCard(val episode: Int, val text: String)
+
+/** Микро-вопрос поверх звука. picked — выбранный вариант, speedDelta — как изменилась скорость. */
+data class MicroState(val q: Question, val picked: Int? = null, val speedDelta: Float = 0f)
+
+data class EpisodeSummary(val episode: Int, val ok: Int, val total: Int, val bestCombo: Int)
 
 /** Вся логика чтения: очередь фрагментов, загрузка озвучки, скорость, опросы. */
 object Engine {
     private const val AHEAD = 4          // сколько фрагментов озвучивать заранее
     private const val KEEP_BEHIND = 10   // сколько прослушанных фрагментов хранить
     private const val AUDIO_DIR = "audio2" // v2: новое качество и тайминги
+    const val EPISODE = 10                 // фрагментов в одной серии
 
     lateinit var app: Context
     lateinit var settings: Settings
@@ -61,10 +76,20 @@ object Engine {
     private var wantPlay = false
     private var listenedSec = 0    // реальное время прослушивания с прошлого опроса
     private var quizFrom = 0       // с какого фрагмента копится текст для опроса
+    private var microSec = 0       // время с прошлого микро-вопроса
+    private var microFrom = 0
+    private var microLoading = false
+    private var lastIndex = -1
+    private var hookedEpisode = -1
+    private val hookLoading = HashSet<Int>()
+    private var epOk = 0
+    private var epTotal = 0
+    private var epBestCombo = 0
 
     fun init(ctx: Context) {
         app = ctx.applicationContext
         settings = Settings(app)
+        Haptics.init(app)
         Thread { File(app.cacheDir, "audio").deleteRecursively() }.start() // аудио старой версии
         player = ExoPlayer.Builder(app)
             .setAudioAttributes(
@@ -95,6 +120,8 @@ object Engine {
                 delay(1000)
                 if (player.isPlaying) {
                     listenedSec++
+                    microSec++
+                    maybeMicro()
                     refresh()
                 }
             }
@@ -134,7 +161,12 @@ object Engine {
         state.value = UiState(bookId = id, title = b.title, count = b.segments.size, index = pos,
             speed = settings.speed, baseWpm = settings.baseWpm)
         listenedSec = 0
+        microSec = 0
+        hookedEpisode = -1
+        lastIndex = pos
+        resetEpisodeStats()
         startAt(pos, play = false)
+        maybeHook(pos, showCard = true)
     }
 
     fun forget(id: String) {
@@ -157,6 +189,7 @@ object Engine {
         player.clearMediaItems()
         queued = i - 1
         quizFrom = i
+        microFrom = i
         settings.setProgress(b.id, i)
         state.update { it.copy(index = i, error = null) }
         fill()
@@ -270,8 +303,12 @@ object Engine {
     private fun onIndexChanged() {
         val b = book ?: return
         val i = currentIndex()
+        if (i == lastIndex + 1 && i % EPISODE == 0) finishEpisode(i / EPISODE - 1)
+        lastIndex = i
         settings.setProgress(b.id, i)
         state.update { it.copy(index = i) }
+        maybeHook(i, showCard = i % EPISODE == 0)
+        if (i % EPISODE == EPISODE - 2) prefetchHook((i + 2) / EPISODE)
         audioFile(b.id, i - KEEP_BEHIND - 1).let { it.delete(); timingFileFor(it).delete() }
         fill()
         maybeQuiz(i)
@@ -341,7 +378,9 @@ object Engine {
     }
 
     fun finishQuiz(ok: Int, total: Int) {
-        if (total > 0) settings.addHistory(HistoryItem(System.currentTimeMillis(), settings.speed, ok, total))
+        if (total > 0) settings.addHistory(
+            HistoryItem(System.currentTimeMillis(), settings.speed, ok, total, "quiz", settings.bgMode)
+        )
         closeQuiz()
     }
 
@@ -354,13 +393,173 @@ object Engine {
         play()
     }
 
+    // ---------- серии и крючки ----------
+
+    private fun episodeText(ep: Int): String {
+        val b = book ?: return ""
+        val from = ep * EPISODE
+        if (from >= b.segments.size) return ""
+        return b.segments.subList(from, minOf(from + EPISODE, b.segments.size)).joinToString("\n")
+    }
+
+    private fun parseHook(json: String): Hook? = runCatching {
+        val o = org.json.JSONObject(json)
+        Hook(o.getString("hook"), o.optString("mood", "calm"))
+    }.getOrNull()
+
+    private fun applyHook(ep: Int, h: Hook, showCard: Boolean) {
+        state.update { it.copy(mood = h.mood, hook = if (showCard && settings.hooks) HookCard(ep, h.text) else it.hook) }
+        refresh()
+    }
+
+    /** Загружает крючок и настроение серии (из кэша или у DeepSeek). */
+    private fun loadHook(ep: Int, onReady: (Hook) -> Unit) {
+        val b = book ?: return
+        settings.getHook(b.id, ep)?.let { parseHook(it) }?.let { onReady(it); return }
+        if (settings.deepseekKey.isBlank() || ep in hookLoading) return
+        val text = episodeText(ep)
+        if (text.isBlank()) return
+        hookLoading.add(ep)
+        val key = settings.deepseekKey
+        scope.launch {
+            try {
+                val h = withContext(Dispatchers.IO) { HookClient.hook(key, text) }
+                settings.setHook(b.id, ep, org.json.JSONObject().put("hook", h.text).put("mood", h.mood).toString())
+                if (book?.id == b.id) onReady(h)
+            } catch (_: Exception) {
+                // крючок — приятное дополнение, без него чтение продолжается
+            } finally {
+                hookLoading.remove(ep)
+            }
+        }
+    }
+
+    private fun maybeHook(i: Int, showCard: Boolean) {
+        val ep = i / EPISODE
+        if (ep == hookedEpisode) return
+        hookedEpisode = ep
+        loadHook(ep) { h -> if (i / EPISODE == currentIndex() / EPISODE) applyHook(ep, h, showCard) }
+    }
+
+    private fun prefetchHook(ep: Int) = loadHook(ep) {}
+
+    fun dismissHook() = state.update { it.copy(hook = null) }
+
+    private fun resetEpisodeStats() {
+        epOk = 0; epTotal = 0; epBestCombo = state.value.combo
+    }
+
+    private fun finishEpisode(ep: Int) {
+        Haptics.episode()
+        state.update { it.copy(episodeDone = EpisodeSummary(ep, epOk, epTotal, epBestCombo)) }
+        resetEpisodeStats()
+        scope.launch {
+            delay(5000)
+            state.update { if (it.episodeDone?.episode == ep) it.copy(episodeDone = null) else it }
+        }
+    }
+
+    // ---------- микро-вопросы, комбо и адаптивная скорость ----------
+
+    private fun maybeMicro() {
+        if (!settings.microEnabled || microLoading) return
+        val st = state.value
+        if (st.micro != null || st.quiz != null) return
+        if (microSec < settings.microMinutes * 60) return
+        val b = book ?: return
+        val cur = currentIndex()
+        val sb = StringBuilder()
+        for (k in microFrom.coerceAtLeast(0) until cur.coerceAtMost(b.segments.size)) sb.append(b.segments[k]).append('\n')
+        // из текущего фрагмента берём только уже прозвучавшую часть
+        position(cur)?.let { (pos, dur) ->
+            if (dur > 0f) {
+                val t = b.segments.getOrNull(cur) ?: ""
+                sb.append(t.take((t.length * (pos / dur)).toInt().coerceIn(0, t.length)))
+            }
+        }
+        val text = sb.toString()
+        if (text.length < 300) return
+        microLoading = true
+        val key = settings.deepseekKey
+        scope.launch {
+            try {
+                val q = withContext(Dispatchers.IO) { MicroClient.question(key, text) }
+                if (state.value.quiz == null) {
+                    state.update { it.copy(micro = MicroState(q)) }
+                    Haptics.tick()
+                }
+            } catch (_: Exception) {
+                microSec = settings.microMinutes * 60 - 60   // попробуем снова через минуту
+            } finally {
+                microLoading = false
+            }
+        }
+    }
+
+    fun answerMicro(picked: Int) {
+        val m = state.value.micro ?: return
+        if (m.picked != null) return
+        val right = picked == m.q.answer
+        var combo = state.value.combo
+        var delta = 0f
+        epTotal++
+        if (right) {
+            combo++
+            epOk++
+            epBestCombo = maxOf(epBestCombo, combo)
+            Haptics.success()
+            if (settings.adaptive && combo % 2 == 0) delta = 0.1f
+        } else {
+            combo = 0
+            Haptics.fail()
+            if (settings.adaptive && settings.speed > 1.0f) delta = -0.1f
+        }
+        if (delta != 0f) setSpeed(settings.speed + delta)
+        settings.addHistory(
+            HistoryItem(System.currentTimeMillis(), settings.speed - delta, if (right) 1 else 0, 1, "micro", settings.bgMode)
+        )
+        state.update { it.copy(micro = m.copy(picked = picked, speedDelta = delta), combo = combo) }
+        scope.launch {
+            delay(1800)
+            closeMicro()
+        }
+    }
+
+    /** Вопрос висел без ответа — убираем без штрафа. */
+    fun dismissMicro() {
+        if (state.value.micro?.picked == null) closeMicro()
+    }
+
+    private fun closeMicro() {
+        microSec = 0
+        microFrom = currentIndex()
+        state.update { it.copy(micro = null) }
+        refresh()
+    }
+
+    // ---------- цитаты ----------
+
+    fun likeSentence(segment: Int, text: String): Boolean {
+        val b = book ?: return false
+        val added = Library.addQuote(app, b.id, Quote(System.currentTimeMillis(), segment, text.trim()))
+        Haptics.like()
+        return added
+    }
+
+    fun currentBookId(): String? = book?.id
+
+    /** Вызывается после сохранения настроек. */
+    fun applySettings() = refresh()
+
     private fun refresh() {
         state.update {
             it.copy(
                 playing = player.isPlaying,
                 buffering = wantPlay && !player.isPlaying && it.quiz == null && it.error == null,
                 listenedSec = listenedSec,
+                microSec = microSec,
             )
         }
+        Ambient.update(Ambient.resolve(settings.ambient, state.value.mood), player.isPlaying, settings.ambientVolume)
     }
 }

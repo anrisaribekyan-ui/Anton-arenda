@@ -110,3 +110,67 @@ object QuizClient {
         return out
     }
 }
+
+/** Общий вызов DeepSeek с ответом в JSON. */
+private fun deepseekJson(key: String, system: String, user: String, temperature: Double): JSONObject {
+    val payload = JSONObject()
+        .put("model", "deepseek-chat")
+        .put("temperature", temperature)
+        .put("response_format", JSONObject().put("type", "json_object"))
+        .put(
+            "messages", JSONArray()
+                .put(JSONObject().put("role", "system").put("content", system))
+                .put(JSONObject().put("role", "user").put("content", user))
+        )
+    val req = Request.Builder()
+        .url("https://api.deepseek.com/chat/completions")
+        .header("Authorization", "Bearer $key")
+        .post(payload.toString().toRequestBody(JSON))
+        .build()
+    val raw = http.newCall(req).execute().use { r ->
+        when {
+            r.code == 401 -> throw IOException("DeepSeek не принял ключ")
+            r.code == 402 -> throw IOException("на балансе DeepSeek закончились деньги")
+            !r.isSuccessful -> throw IOException("DeepSeek ответил ${r.code}")
+        }
+        r.body!!.string()
+    }
+    val content = JSONObject(raw).getJSONArray("choices").getJSONObject(0)
+        .getJSONObject("message").getString("content")
+    return JSONObject(content)
+}
+
+data class Hook(val text: String, val mood: String)
+
+val MOODS = listOf("calm", "warm", "joy", "business", "tense", "dark", "sad")
+
+object HookClient {
+    private const val SYSTEM = """Ты пишешь короткий «крючок» перед следующей серией аудиокниги, чтобы слушателю захотелось узнать продолжение.
+Тебе дают текст, который он сейчас услышит. Напиши ОДНУ фразу до 120 символов: интригующий вопрос или намёк на то, что произойдёт или станет понятно.
+Не раскрывай развязку и ответ, не пересказывай, не используй кавычки и эмодзи. Пиши по-русски, живо и конкретно, с именами из текста.
+Также определи настроение отрывка одним словом из списка: calm, warm, joy, business, tense, dark, sad.
+Ответ строго в JSON: {"hook":"...","mood":"..."}"""
+
+    fun hook(key: String, text: String): Hook {
+        val o = deepseekJson(key, SYSTEM, text.take(6000), 0.8)
+        val mood = o.optString("mood").takeIf { it in MOODS } ?: "calm"
+        return Hook(o.getString("hook").trim(), mood)
+    }
+}
+
+object MicroClient {
+    private const val SYSTEM = """Ты задаёшь один быстрый вопрос, проверяющий, слушал ли человек отрывок книги внимательно.
+Вопрос по конкретному факту, поступку, причине или детали из отрывка, особенно из его последней части. Не по общим знаниям.
+Вопрос до 80 символов. Ровно 2 варианта ответа до 40 символов, верный один, неверный правдоподобный.
+Ответ строго в JSON: {"q":"...","options":["...","..."],"answer":0}"""
+
+    fun question(key: String, text: String): Question {
+        val o = deepseekJson(key, SYSTEM, text.takeLast(5000), 0.5)
+        val arr = o.getJSONArray("options")
+        val opts = (0 until arr.length()).map { arr.getString(it) }
+        val ans = o.getInt("answer")
+        if (opts.size != 2 || ans !in opts.indices) throw IOException("DeepSeek вернул неверный вопрос")
+        val order = opts.indices.shuffled()
+        return Question(o.getString("q"), order.map { opts[it] }, order.indexOf(ans))
+    }
+}

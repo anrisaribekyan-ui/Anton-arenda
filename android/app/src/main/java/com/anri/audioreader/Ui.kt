@@ -3,11 +3,23 @@
 package com.anri.audioreader
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -124,10 +136,11 @@ fun AppRoot() {
             var screen by rememberSaveable {
                 mutableStateOf(if (Engine.state.value.bookId != null) "player" else "library")
             }
-            BackHandler(enabled = screen != "library") { screen = "library" }
+            BackHandler(enabled = screen != "library") { screen = if (screen == "quotes") "player" else "library" }
             Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
                 when (screen) {
-                    "player" -> PlayerScreen(onBack = { screen = "library" })
+                    "player" -> PlayerScreen(onBack = { screen = "library" }, onQuotes = { screen = "quotes" })
+                    "quotes" -> QuotesScreen(onBack = { screen = "player" })
                     "settings" -> SettingsScreen(onBack = { screen = "library" })
                     else -> LibraryScreen(
                         onOpen = { id -> Engine.open(id); screen = "player" },
@@ -344,39 +357,186 @@ private fun Notice(text: String, action: String, onAction: () -> Unit) {
 // ======================= Плеер =======================
 
 @Composable
-fun PlayerScreen(onBack: () -> Unit) {
+fun PlayerScreen(onBack: () -> Unit, onQuotes: () -> Unit) {
     val s by Engine.state.collectAsStateWithLifecycle()
     val cs = MaterialTheme.colorScheme
+    val st = Engine.settings
+    val scope = rememberCoroutineScope()
+    val pulse = remember { Animatable(0f) }
+    val onWord: () -> Unit = {
+        scope.launch {
+            pulse.snapTo((pulse.value + 0.5f).coerceAtMost(1f))
+            pulse.animateTo(0f, tween(700))
+        }
+    }
 
-    Column(Modifier.fillMaxSize()) {
-        Row(Modifier.padding(start = 4.dp, end = 16.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "К книгам") }
-            Column(Modifier.weight(1f)) {
-                Text(s.title, style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Serif,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("Фрагмент ${s.index + 1} из ${s.count} · ${percent(s.index + 1, s.count)}%",
-                    style = MaterialTheme.typography.labelMedium, color = cs.onSurfaceVariant)
+    Box(Modifier.fillMaxSize()) {
+        if (st.bgMode == "gradient") BreathingBackground(s.mood, { pulse.value }, Modifier.matchParentSize())
+        Column(Modifier.fillMaxSize()) {
+            Row(Modifier.padding(start = 4.dp, end = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "К книгам") }
+                Column(Modifier.weight(1f)) {
+                    Text(s.title, style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Serif,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("Серия ${s.index / Engine.EPISODE + 1} · фрагмент ${s.index + 1} из ${s.count} · ${percent(s.index + 1, s.count)}%",
+                        style = MaterialTheme.typography.labelMedium, color = cs.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                IconButton(onClick = onQuotes) { Icon(Icons.Filled.Favorite, contentDescription = "Цитаты", tint = cs.tertiary) }
             }
-        }
-        Box(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
-            ThinProgress(if (s.count > 0) (s.index + 1f) / s.count else 0f, cs.primary, cs.surfaceVariant)
-        }
+            if (!st.landscape) {
+                Box(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                    ThinProgress(if (s.count > 0) (s.index + 1f) / s.count else 0f, cs.primary, cs.surfaceVariant)
+                }
+            }
 
-        key(s.index) {
-            KaraokeReader(s.index, Engine.segmentText(s.index), Modifier.weight(1f))
-        }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                key(s.index) {
+                    KaraokeReader(s.index, Engine.segmentText(s.index), Modifier.fillMaxSize(), onWord)
+                }
+                Column(Modifier.align(Alignment.TopCenter)) {
+                    s.hook?.let { HookCardView(it) }
+                    s.episodeDone?.let { EpisodeBanner(it) }
+                }
+                s.micro?.let { MicroCard(it, Modifier.align(Alignment.BottomCenter)) }
+            }
 
-        ControlPanel(s)
+            if (st.bgMode == "split") {
+                FlowPanel(s.mood, Modifier.fillMaxWidth().height(140.dp))
+            }
+            if (st.landscape) {
+                LandscapeProgress(
+                    seed = s.bookId ?: "",
+                    progress = if (s.count > 0) (s.index + 0.5f) / s.count else 0f,
+                    line = cs.primary,
+                    fill = cs.primary.copy(alpha = 0.16f),
+                    modifier = Modifier.fillMaxWidth().height(46.dp).padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
+            ControlPanel(s)
+        }
     }
 
     s.quiz?.let { QuizDialog(it) }
 }
 
-/** Текст фрагмента: прочитанные слова яркие, текущее — маркером, строка — подложкой. */
 @Composable
-fun KaraokeReader(index: Int, text: String, modifier: Modifier) {
+private fun HookCardView(h: HookCard) {
+    val cs = MaterialTheme.colorScheme
+    LaunchedEffect(h) {
+        delay(14000)
+        Engine.dismissHook()
+    }
+    Surface(
+        onClick = { Engine.dismissHook() },
+        color = cs.tertiaryContainer,
+        shape = RoundedCornerShape(20.dp),
+        shadowElevation = 6.dp,
+        modifier = Modifier.padding(12.dp).fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("СЕРИЯ ${h.episode + 1} · ЧТО ДАЛЬШЕ", style = MaterialTheme.typography.labelSmall,
+                letterSpacing = 1.2.sp, color = cs.onTertiaryContainer.copy(alpha = 0.75f))
+            Text(h.text, style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Serif,
+                color = cs.onTertiaryContainer)
+        }
+    }
+}
+
+@Composable
+private fun EpisodeBanner(e: EpisodeSummary) {
+    val cs = MaterialTheme.colorScheme
+    Surface(
+        color = cs.primaryContainer,
+        shape = RoundedCornerShape(20.dp),
+        shadowElevation = 6.dp,
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp).fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Серия ${e.episode + 1} пройдена", style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold, color = cs.onPrimaryContainer)
+            val parts = buildList {
+                if (e.total > 0) add("понимание ${e.ok} из ${e.total}")
+                if (e.bestCombo > 1) add("лучшее комбо ×${e.bestCombo}")
+            }
+            if (parts.isNotEmpty()) Text(parts.joinToString(" · "), color = cs.onPrimaryContainer)
+        }
+    }
+}
+
+@Composable
+private fun MicroCard(m: MicroState, modifier: Modifier) {
+    val cs = MaterialTheme.colorScheme
+    LaunchedEffect(m.q) {
+        delay(20000)
+        Engine.dismissMicro()
+    }
+    Surface(
+        color = cs.surface,
+        shape = RoundedCornerShape(24.dp),
+        shadowElevation = 14.dp,
+        border = BorderStroke(1.dp, cs.outlineVariant),
+        modifier = modifier.padding(12.dp).fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("БЫСТРЫЙ ВОПРОС", style = MaterialTheme.typography.labelSmall, letterSpacing = 1.2.sp,
+                    color = cs.tertiary, modifier = Modifier.weight(1f))
+                if (m.picked == null) {
+                    Text("звук не останавливается", style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant)
+                }
+            }
+            Text(m.q.q, style = MaterialTheme.typography.titleMedium, fontFamily = FontFamily.Serif)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                m.q.options.forEachIndexed { i, opt ->
+                    val answered = m.picked != null
+                    val isRight = i == m.q.answer
+                    val bg = when {
+                        answered && isRight -> GOOD.copy(alpha = 0.18f)
+                        answered && i == m.picked -> cs.error.copy(alpha = 0.15f)
+                        else -> cs.surfaceVariant
+                    }
+                    val fg = when {
+                        answered && isRight -> GOOD
+                        answered && i == m.picked -> cs.error
+                        else -> cs.onSurface
+                    }
+                    Surface(
+                        onClick = { Engine.answerMicro(i) },
+                        enabled = !answered,
+                        shape = RoundedCornerShape(16.dp),
+                        color = bg,
+                        modifier = Modifier.weight(1f).heightIn(min = 60.dp),
+                    ) {
+                        Box(Modifier.padding(12.dp), contentAlignment = Alignment.Center) {
+                            Text(opt, color = fg, textAlign = TextAlign.Center, fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
+            }
+            m.picked?.let { p ->
+                val right = p == m.q.answer
+                val speedNote = when {
+                    m.speedDelta > 0f -> " Скорость +0,1"
+                    m.speedDelta < 0f -> " Скорость −0,1"
+                    else -> ""
+                }
+                Text(
+                    (if (right) "Верно!" else "Мимо.") + speedNote,
+                    color = if (right) GOOD else cs.error,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+/** Текст фрагмента: прочитанные слова яркие, текущее — маркером, строка — подложкой. Двойной тап — в цитаты. */
+@Composable
+fun KaraokeReader(index: Int, text: String, modifier: Modifier, onWord: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     val density = LocalDensity.current
+    val scope = rememberCoroutineScope()
     val words = remember(text) { Karaoke.words(text) }
     var sentences by remember { mutableStateOf<List<Sentence>?>(null) }
     var pos by remember { mutableFloatStateOf(-1f) }
@@ -400,6 +560,7 @@ fun KaraokeReader(index: Int, text: String, modifier: Modifier) {
         ss?.let { Karaoke.schedule(text, words, it) }
     }
     val cur = if (starts != null && pos >= 0f && words.isNotEmpty()) Karaoke.current(starts, pos) else -1
+    LaunchedEffect(cur) { if (cur >= 0) onWord() }
 
     val upcoming = cs.onSurface.copy(alpha = 0.42f)
     val annotated = remember(text, cur, cs) {
@@ -434,31 +595,99 @@ fun KaraokeReader(index: Int, text: String, modifier: Modifier) {
         scroll.animateScrollTo((top - viewport * 0.3f).roundToInt().coerceAtLeast(0))
     }
 
+    // Лайк: сердечко в месте тапа и короткая подпись
+    var heartAt by remember { mutableStateOf<Offset?>(null) }
+    val heart = remember { Animatable(0f) }
+    var likeNote by remember { mutableStateOf<String?>(null) }
+
     val band = cs.primary.copy(alpha = 0.09f)
-    Box(modifier.fillMaxWidth().onSizeChanged { viewport = it.height }.verticalScroll(scroll)) {
-        Text(
-            text = annotated,
-            style = ReadingStyle.copy(color = cs.onSurface),
-            onTextLayout = { layout = it },
-            modifier = Modifier
-                .fillMaxWidth()
-                .drawBehind {
-                    val l = layout
-                    val line = curLine
-                    if (l != null && line != null) {
-                        val ext = 3.dp.toPx()
-                        val inset = (padH / 2).toPx()
-                        drawRoundRect(
-                            color = band,
-                            topLeft = Offset(inset, l.getLineTop(line) + padV.toPx() - ext),
-                            size = Size(size.width - inset * 2, l.getLineBottom(line) - l.getLineTop(line) + ext * 2),
-                            cornerRadius = CornerRadius(12.dp.toPx()),
-                        )
+    Box(modifier.fillMaxWidth().onSizeChanged { viewport = it.height }) {
+        Box(Modifier.fillMaxSize().verticalScroll(scroll)) {
+            Text(
+                text = annotated,
+                style = ReadingStyle.copy(color = cs.onSurface),
+                onTextLayout = { layout = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pointerInput(text) {
+                        detectTapGestures(onDoubleTap = { off ->
+                            val l = layout ?: return@detectTapGestures
+                            val o = l.getOffsetForPosition(Offset(off.x - padH.toPx(), off.y - padV.toPx()))
+                            val (a, b) = sentenceAround(text, sentences, o)
+                            if (b > a) {
+                                val added = Engine.likeSentence(index, text.substring(a, b))
+                                likeNote = if (added) "Фраза сохранена в цитаты" else "Эта фраза уже в цитатах"
+                                heartAt = off
+                                scope.launch {
+                                    heart.snapTo(0f)
+                                    heart.animateTo(1f, tween(900))
+                                    heartAt = null
+                                }
+                                scope.launch {
+                                    delay(1800)
+                                    likeNote = null
+                                }
+                            }
+                        })
                     }
-                }
-                .padding(horizontal = padH, vertical = padV),
-        )
+                    .drawBehind {
+                        val l = layout
+                        val line = curLine
+                        if (l != null && line != null) {
+                            val ext = 3.dp.toPx()
+                            val inset = (padH / 2).toPx()
+                            drawRoundRect(
+                                color = band,
+                                topLeft = Offset(inset, l.getLineTop(line) + padV.toPx() - ext),
+                                size = Size(size.width - inset * 2, l.getLineBottom(line) - l.getLineTop(line) + ext * 2),
+                                cornerRadius = CornerRadius(12.dp.toPx()),
+                            )
+                        }
+                    }
+                    .padding(horizontal = padH, vertical = padV),
+            )
+            heartAt?.let { p ->
+                val k = heart.value
+                Text(
+                    "♥",
+                    color = cs.tertiary,
+                    fontSize = 46.sp,
+                    modifier = Modifier
+                        .offset { IntOffset((p.x - 40).roundToInt(), (p.y - 90 - k * 120).roundToInt()) }
+                        .graphicsLayer {
+                            alpha = 1f - k
+                            scaleX = 0.7f + k * 0.8f
+                            scaleY = 0.7f + k * 0.8f
+                        },
+                )
+            }
+        }
+        likeNote?.let {
+            Surface(
+                color = cs.inverseSurface,
+                shape = CircleShape,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+            ) {
+                Text(it, color = cs.inverseOnSurface, style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+            }
+        }
     }
+}
+
+/** Границы предложения вокруг позиции: по таймингам сервера или по знакам препинания. */
+private fun sentenceAround(text: String, sentences: List<Sentence>?, offset: Int): Pair<Int, Int> {
+    sentences?.firstOrNull { offset >= it.charStart && offset <= it.charEnd }?.let {
+        return it.charStart to it.charEnd.coerceAtMost(text.length)
+    }
+    val o = offset.coerceIn(0, text.length)
+    var a = o
+    while (a > 0 && text[a - 1] !in ".!?…\n") a--
+    var b = o
+    while (b < text.length && text[b] !in ".!?…\n") b++
+    while (b < text.length && text[b] in ".!?…»\"") b++
+    while (a < b && text[a].isWhitespace()) a++
+    return a to b
 }
 
 @Composable
@@ -486,14 +715,22 @@ private fun ControlPanel(s: UiState) {
                         CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                         Text("Озвучиваю текст…", color = cs.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
                     }
-                    else -> {
-                        val label = if (Engine.settings.quizEnabled) {
-                            val left = maxOf(0, Engine.settings.quizMinutes * 60 - s.listenedSec)
-                            "Опрос через ${left / 60}:${(left % 60).toString().padStart(2, '0')}"
-                        } else "Опросы выключены"
-                        Surface(color = cs.secondaryContainer, shape = CircleShape) {
-                            Text(label, style = MaterialTheme.typography.labelMedium, color = cs.onSecondaryContainer,
-                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+                    else -> Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val st = Engine.settings
+                        fun mmss(sec: Int) = "${sec / 60}:${(sec % 60).toString().padStart(2, '0')}"
+                        if (s.combo > 0) {
+                            Chip("Комбо ×${s.combo}", cs.tertiaryContainer, cs.onTertiaryContainer)
+                        }
+                        if (st.microEnabled) {
+                            Chip("Вопрос через ${mmss(maxOf(0, st.microMinutes * 60 - s.microSec))}",
+                                cs.secondaryContainer, cs.onSecondaryContainer)
+                        }
+                        if (st.quizEnabled) {
+                            Chip("Опрос через ${mmss(maxOf(0, st.quizMinutes * 60 - s.listenedSec))}",
+                                cs.secondaryContainer, cs.onSecondaryContainer)
+                        }
+                        if (!st.microEnabled && !st.quizEnabled && s.combo == 0) {
+                            Chip("Вопросы выключены", cs.secondaryContainer, cs.onSecondaryContainer)
                         }
                     }
                 }
@@ -547,6 +784,14 @@ private fun ControlPanel(s: UiState) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun Chip(text: String, bg: Color, fg: Color) {
+    Surface(color = bg, shape = CircleShape) {
+        Text(text, style = MaterialTheme.typography.labelMedium, color = fg,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
     }
 }
 
@@ -664,6 +909,14 @@ fun SettingsScreen(onBack: () -> Unit) {
     var key by remember { mutableStateOf(st.deepseekKey) }
     var minutes by remember { mutableStateOf(st.quizMinutes.toString()) }
     var count by remember { mutableStateOf(st.quizCount.toString()) }
+    var micro by remember { mutableStateOf(st.microMinutes.toString()) }
+    var adaptive by remember { mutableStateOf(st.adaptive) }
+    var haptics by remember { mutableStateOf(st.haptics) }
+    var hooks by remember { mutableStateOf(st.hooks) }
+    var bgMode by remember { mutableStateOf(st.bgMode) }
+    var landscape by remember { mutableStateOf(st.landscape) }
+    var ambient by remember { mutableStateOf(st.ambient) }
+    var volume by remember { mutableFloatStateOf(st.ambientVolume) }
     var saved by remember { mutableStateOf(false) }
     var check by remember { mutableStateOf<String?>(null) }
     var cacheNote by remember { mutableStateOf<String?>(null) }
@@ -743,7 +996,45 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
 
+            Section("Внимание") {
+                OutlinedTextField(
+                    value = micro, onValueChange = { v -> micro = v.filter { it.isDigit() }.take(2); saved = false },
+                    label = { Text("Быстрый вопрос каждые, мин") }, singleLine = true,
+                    supportingText = { Text("Один вопрос поверх звука, 0 — выключить") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth(),
+                )
+                ToggleRow("Адаптивная скорость", "Два верных ответа подряд: +0,1. Ошибка: −0,1", adaptive) { adaptive = it; saved = false }
+                ToggleRow("Крючок перед серией", "Интригующая фраза перед каждыми 10 фрагментами", hooks) { hooks = it; saved = false }
+                ToggleRow("Вибрация", "Ответы, лайки и конец серии", haptics) { haptics = it; saved = false }
+                ToggleRow("Пейзаж прогресса", "Линия гор, которая прорисовывается по мере чтения", landscape) { landscape = it; saved = false }
+            }
+
+            Section("Фон") {
+                Choice(listOf("gradient" to "Дышащий градиент", "split" to "Сплит-скрин", "plain" to "Без фона"), bgMode) {
+                    bgMode = it; saved = false
+                }
+            }
+
+            Section("Фоновый звук") {
+                Choice(
+                    listOf("auto" to "Авто, по настроению серии", "brown" to "Коричневый шум", "rain" to "Дождь",
+                        "fire" to "Камин", "off" to "Выключен"),
+                    ambient,
+                ) { ambient = it; saved = false }
+                Text("Громкость", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                Slider(value = volume, onValueChange = { volume = it; saved = false }, valueRange = 0.05f..1f)
+            }
+
             Button(onClick = {
+                st.microMinutes = micro.toIntOrNull() ?: 0
+                st.adaptive = adaptive
+                st.haptics = haptics
+                st.hooks = hooks
+                st.bgMode = bgMode
+                st.landscape = landscape
+                st.ambient = ambient
+                st.ambientVolume = volume
+                Engine.applySettings()
                 st.serverUrl = server
                 st.serverToken = token
                 st.speaker = speaker
@@ -770,6 +1061,26 @@ fun SettingsScreen(onBack: () -> Unit) {
                             Text("$pct%", modifier = Modifier.width(48.dp), textAlign = TextAlign.End)
                         }
                     }
+                    val byMode = history.filter { it.mode.isNotEmpty() }.groupBy { it.mode }
+                    if (byMode.isNotEmpty()) {
+                        HorizontalDivider(color = cs.outlineVariant)
+                        Text("По фону", fontWeight = FontWeight.SemiBold)
+                        val names = mapOf("gradient" to "Градиент", "split" to "Сплит-скрин", "plain" to "Без фона")
+                        byMode.forEach { (mode, list) ->
+                            val ok = list.sumOf { it.ok }
+                            val total = list.sumOf { it.total }
+                            val pct = if (total > 0) ok * 100 / total else 0
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(names[mode] ?: mode, modifier = Modifier.width(110.dp))
+                                Box(Modifier.weight(1f)) {
+                                    ThinProgress(pct / 100f, if (pct >= 70) GOOD else cs.error, cs.surfaceVariant)
+                                }
+                                Text("$pct%", modifier = Modifier.width(48.dp), textAlign = TextAlign.End)
+                            }
+                        }
+                        Text("Ответов: ${byMode.values.sumOf { l -> l.sumOf { it.total } }}. Чем больше, тем точнее сравнение.",
+                            style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                    }
                     HorizontalDivider(color = cs.outlineVariant)
                     val df = SimpleDateFormat("d MMM, HH:mm", Locale("ru"))
                     history.takeLast(8).reversed().forEach {
@@ -783,6 +1094,91 @@ fun SettingsScreen(onBack: () -> Unit) {
                 Text("Очистить скачанное аудио")
             }
             cacheNote?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        }
+    }
+}
+
+@Composable
+private fun ToggleRow(title: String, hint: String, value: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onChange(!value) }.padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title)
+            Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = value, onCheckedChange = onChange)
+    }
+}
+
+@Composable
+private fun Choice(options: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        options.forEach { (id, name) ->
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onSelect(id) }.padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(selected = selected == id, onClick = null, modifier = Modifier.padding(horizontal = 8.dp))
+                Text(name)
+            }
+        }
+    }
+}
+
+// ======================= Цитаты =======================
+
+@Composable
+fun QuotesScreen(onBack: () -> Unit) {
+    val ctx = LocalContext.current
+    val cs = MaterialTheme.colorScheme
+    val id = Engine.currentBookId()
+    var quotes by remember { mutableStateOf(if (id != null) Library.quotes(ctx, id).reversed() else emptyList()) }
+
+    Column(Modifier.fillMaxSize()) {
+        Row(Modifier.padding(start = 4.dp, top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Назад") }
+            Column {
+                Text("Цитаты", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(Engine.state.value.title, style = MaterialTheme.typography.labelMedium, color = cs.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        if (quotes.isEmpty()) {
+            Column(
+                Modifier.fillMaxWidth().padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text("Пока пусто", style = MaterialTheme.typography.titleMedium)
+                Text("Дважды коснись фразы во время чтения, и она появится здесь.",
+                    color = cs.onSurfaceVariant, textAlign = TextAlign.Center)
+            }
+        }
+        LazyColumn(
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            items(quotes, key = { it.time }) { q ->
+                Card(colors = CardDefaults.cardColors(containerColor = cs.surface), shape = RoundedCornerShape(18.dp)) {
+                    Row(Modifier.padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 4.dp)) {
+                        Box(Modifier.width(3.dp).height(48.dp).clip(CircleShape).background(cs.tertiary))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(q.text, style = ReadingStyle.copy(fontSize = 18.sp, lineHeight = 27.sp, color = cs.onSurface))
+                            Text("Фрагмент ${q.segment + 1}", style = MaterialTheme.typography.labelSmall,
+                                color = cs.onSurfaceVariant)
+                        }
+                        IconButton(onClick = {
+                            if (id != null) {
+                                Library.deleteQuote(ctx, id, q.time)
+                                quotes = Library.quotes(ctx, id).reversed()
+                            }
+                        }) { Icon(Icons.Filled.Delete, contentDescription = "Удалить", tint = cs.onSurfaceVariant) }
+                    }
+                }
+            }
         }
     }
 }
