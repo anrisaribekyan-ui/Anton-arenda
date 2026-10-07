@@ -36,6 +36,11 @@ class Settings(ctx: Context) {
         get() = p.getFloat("speed", 1.0f)
         set(v) = p.edit().putFloat("speed", v).apply()
 
+    /** Средний темп голоса на х1 (слов в минуту), измеряется по сыгранным фрагментам. */
+    var baseWpm: Float
+        get() = p.getFloat("baseWpm", 0f)
+        set(v) = p.edit().putFloat("baseWpm", v).apply()
+
     val quizEnabled: Boolean get() = quizMinutes > 0 && deepseekKey.isNotBlank()
 
     fun getProgress(id: String): Int = p.getInt("pos_$id", 0)

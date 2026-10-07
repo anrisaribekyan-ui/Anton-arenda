@@ -38,6 +38,7 @@ data class UiState(
     val error: String? = null,
     val quiz: QuizState? = null,
     val listenedSec: Int = 0,
+    val baseWpm: Float = 0f,
 )
 
 /** Вся логика чтения: очередь фрагментов, загрузка озвучки, скорость, опросы. */
@@ -73,13 +74,14 @@ object Engine {
             .setHandleAudioBecomingNoisy(true)
             .build()
         player.setPlaybackSpeed(settings.speed)
-        state.update { it.copy(speed = settings.speed) }
+        state.update { it.copy(speed = settings.speed, baseWpm = settings.baseWpm) }
 
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = onIndexChanged()
             override fun onIsPlayingChanged(isPlaying: Boolean) = refresh()
             override fun onPlaybackStateChanged(playbackState: Int) {
                 if (playbackState == Player.STATE_ENDED) onEnded()
+                if (playbackState == Player.STATE_READY) measureWpm()
                 refresh()
             }
             override fun onPlayerError(error: PlaybackException) {
@@ -129,7 +131,8 @@ object Engine {
         val b = Library.load(app, id)
         book = b
         val pos = settings.getProgress(id).coerceIn(0, maxOf(0, b.segments.size - 1))
-        state.value = UiState(bookId = id, title = b.title, count = b.segments.size, index = pos, speed = settings.speed)
+        state.value = UiState(bookId = id, title = b.title, count = b.segments.size, index = pos,
+            speed = settings.speed, baseWpm = settings.baseWpm)
         listenedSec = 0
         startAt(pos, play = false)
     }
@@ -141,7 +144,7 @@ object Engine {
             player.stop()
             player.clearMediaItems()
             book = null
-            state.value = UiState(speed = settings.speed)
+            state.value = UiState(speed = settings.speed, baseWpm = settings.baseWpm)
         }
         File(app.cacheDir, "$AUDIO_DIR/$id").deleteRecursively()
     }
@@ -272,6 +275,25 @@ object Engine {
         audioFile(b.id, i - KEEP_BEHIND - 1).let { it.delete(); timingFileFor(it).delete() }
         fill()
         maybeQuiz(i)
+    }
+
+    private var measured = -1
+
+    /** Темп голоса: слова фрагмента / его длительность на х1, скользящее среднее. */
+    private fun measureWpm() {
+        val b = book ?: return
+        val i = currentIndex()
+        if (i == measured) return
+        val ms = player.duration
+        if (ms < 5000) return
+        val words = Karaoke.words(b.segments.getOrNull(i) ?: return).size
+        if (words < 15) return
+        measured = i
+        val wpm = words / (ms / 60000f)
+        val old = settings.baseWpm
+        val avg = if (old <= 0f) wpm else old * 0.85f + wpm * 0.15f
+        settings.baseWpm = avg
+        state.update { it.copy(baseWpm = avg) }
     }
 
     private fun onEnded() {

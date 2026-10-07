@@ -506,7 +506,10 @@ private fun ControlPanel(s: UiState) {
                 }
                 Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(fmtSpeed(s.speed), fontSize = 34.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
-                    Text("скорость", style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant)
+                    Text(
+                        if (s.baseWpm > 0f) "≈ ${(s.baseWpm * s.speed).roundToInt()} слов/мин" else "скорость",
+                        style = MaterialTheme.typography.labelMedium, color = cs.onSurfaceVariant,
+                    )
                 }
                 RoundButton(size = 48.dp, filled = false, enabled = s.speed < 8f, onClick = { Engine.setSpeed(s.speed + 0.1f) }) {
                     Text("+", fontSize = 24.sp, color = cs.onSurface)
