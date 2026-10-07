@@ -137,6 +137,8 @@ fun AppRoot() {
                 mutableStateOf(if (Engine.state.value.bookId != null) "player" else "library")
             }
             BackHandler(enabled = screen != "library") { screen = if (screen == "quotes") "player" else "library" }
+            var crash by remember { mutableStateOf(CrashLog.read()) }
+            crash?.let { text -> CrashDialog(text) { CrashLog.clear(); crash = null } }
             Box(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
                 when (screen) {
                     "player" -> PlayerScreen(onBack = { screen = "library" }, onQuotes = { screen = "quotes" })
@@ -1190,6 +1192,33 @@ private fun Section(title: String, content: @Composable () -> Unit) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             content()
+        }
+    }
+}
+
+@Composable
+private fun CrashDialog(text: String, onClose: () -> Unit) {
+    val cs = MaterialTheme.colorScheme
+    val ctx = LocalContext.current
+    var copied by remember { mutableStateOf(false) }
+    Dialog(onDismissRequest = onClose) {
+        Surface(shape = RoundedCornerShape(24.dp), color = cs.surface) {
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("В прошлый раз приложение упало", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Скопируй отчёт и пришли его в чат, по нему видно причину.", color = cs.onSurfaceVariant)
+                Surface(color = cs.surfaceVariant, shape = RoundedCornerShape(12.dp), modifier = Modifier.heightIn(max = 220.dp)) {
+                    Text(text, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.verticalScroll(rememberScrollState()).padding(10.dp))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = {
+                        val cm = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("crash", text))
+                        copied = true
+                    }) { Text(if (copied) "Скопировано" else "Скопировать") }
+                    TextButton(onClick = onClose) { Text("Закрыть") }
+                }
+            }
         }
     }
 }

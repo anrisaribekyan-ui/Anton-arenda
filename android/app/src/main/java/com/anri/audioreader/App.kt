@@ -19,6 +19,7 @@ import com.google.common.util.concurrent.ListenableFuture
 class App : Application() {
     override fun onCreate() {
         super.onCreate()
+        CrashLog.install(this)
         Engine.init(this)
     }
 }
@@ -65,4 +66,29 @@ class MainActivity : ComponentActivity() {
         controller?.let { MediaController.releaseFuture(it) }
         super.onDestroy()
     }
+}
+
+/** Если приложение упадёт, причина сохранится и покажется при следующем запуске. */
+object CrashLog {
+    private lateinit var file: java.io.File
+
+    fun install(ctx: android.content.Context) {
+        file = java.io.File(ctx.filesDir, "crash.txt")
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            runCatching {
+                file.writeText("Версия ${BuildConfigInfo.version(ctx)}\nПоток: ${t.name}\n\n" + e.stackTraceToString().take(6000))
+            }
+            prev?.uncaughtException(t, e)
+        }
+    }
+
+    fun read(): String? = runCatching { if (file.exists()) file.readText() else null }.getOrNull()
+    fun clear() { runCatching { file.delete() } }
+}
+
+object BuildConfigInfo {
+    fun version(ctx: android.content.Context): String = runCatching {
+        ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName ?: "?"
+    }.getOrDefault("?")
 }

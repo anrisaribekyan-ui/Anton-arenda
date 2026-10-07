@@ -65,8 +65,13 @@ object Ambient {
         volume = vol
         active = playing && kindNow != "off"
         track?.setVolume(volume)
-        if (active && thread == null) start()
+        if (active && thread == null && !failed) {
+            // фоновый звук — дополнение: если не запустился, чтение идёт дальше без него
+            runCatching { start() }.onFailure { failed = true; track = null }
+        }
     }
+
+    @Volatile private var failed = false
 
     private fun start() {
         val minBuf = AudioTrack.getMinBufferSize(RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -84,13 +89,20 @@ object Ambient {
                     .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                     .build()
             )
-            .setBufferSizeInBytes(max(minBuf, RATE / 2))
+            .setBufferSizeInBytes(max(minBuf, RATE))   // байты; для 16 бит размер обязан быть чётным
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
         track = t
         t.setVolume(volume)
         t.play()
-        thread = Thread({ loop(t) }, "ambient").apply { isDaemon = true; start() }
+        thread = Thread({
+            try {
+                loop(t)
+            } catch (_: Throwable) {
+                failed = true
+                runCatching { t.release() }
+            }
+        }, "ambient").apply { isDaemon = true; start() }
     }
 
     private fun loop(t: AudioTrack) {
