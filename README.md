@@ -16,27 +16,27 @@ git clone <этот репозиторий> chitalka && cd chitalka/server
 echo "TTS_TOKEN=$(openssl rand -hex 24)" > .env
 cat .env                      # этот токен вставишь в приложение
 docker compose up -d --build
-curl http://localhost:8000/health
+curl http://localhost:8010/health
 ```
 
 Проверка озвучки:
 
 ```bash
-curl -X POST http://localhost:8000/tts \
+curl -X POST http://localhost:8010/tts \
   -H "Authorization: Bearer $(grep TTS_TOKEN .env | cut -d= -f2)" \
   -H "Content-Type: application/json" \
   -d '{"text":"Привет, это проверка голоса.","speaker":"xenia"}' -o test.ogg
 ```
 
-Адрес для приложения: `http://IP_СЕРВЕРА:8000`. Открой порт 8000 в фаерволе.
+Адрес для приложения: `http://IP_СЕРВЕРА:8010`. Открой порт 8010 в фаерволе.
 
-**Лучше через HTTPS.** Если на сервере есть nginx и поддомен, в `docker-compose.yml` замени порт на `127.0.0.1:8000:8000` и добавь:
+**Лучше через HTTPS.** Если на сервере есть nginx и поддомен, в `docker-compose.yml` замени порт на `127.0.0.1:8010:8000` и добавь:
 
 ```nginx
 server {
     server_name tts.example.ru;
     location / {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:8010;
         proxy_read_timeout 180s;
     }
     # listen 443 ssl; сертификаты — через certbot --nginx

@@ -3,8 +3,8 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      # Наружу на порту 8000. Если ставишь за nginx с HTTPS — замени на "127.0.0.1:8000:8000".
-      - "8000:8000"
+      # Наружу на порту 8000. Если ставишь за nginx с HTTPS — замени на "127.0.0.1:8010:8000".
+      - "8010:8000"
     environment:
       TTS_TOKEN: ${TTS_TOKEN}
       TORCH_THREADS: "4"

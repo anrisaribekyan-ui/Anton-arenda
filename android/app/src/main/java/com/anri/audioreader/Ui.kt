@@ -368,7 +368,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         Text("Сервер озвучки", style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(
             value = server, onValueChange = { server = it; saved = false },
-            label = { Text("Адрес, например http://1.2.3.4:8000") },
+            label = { Text("Адрес, например http://1.2.3.4:8010") },
             singleLine = true, modifier = Modifier.fillMaxWidth(),
         )
         OutlinedTextField(
