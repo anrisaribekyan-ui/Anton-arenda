@@ -60,10 +60,35 @@ def spell_numbers(text: str) -> str:
     return re.sub(r"\d+", repl, text)
 
 
+LAT = {
+    "sh": "ш", "ch": "ч", "zh": "ж", "th": "т", "ph": "ф", "kh": "х", "ts": "ц",
+    "ya": "я", "yu": "ю", "ee": "и", "oo": "у", "ck": "к", "qu": "кв",
+}
+LAT1 = {
+    "a": "а", "b": "б", "c": "к", "d": "д", "e": "е", "f": "ф", "g": "г", "h": "х",
+    "i": "и", "j": "дж", "k": "к", "l": "л", "m": "м", "n": "н", "o": "о", "p": "п",
+    "q": "к", "r": "р", "s": "с", "t": "т", "u": "у", "v": "в", "w": "в", "x": "кс",
+    "y": "и", "z": "з",
+}
+CYR = re.compile(r"[А-Яа-яЁё]")
+
+
+def translit(text: str) -> str:
+    """Латиницу — в кириллицу: русская модель Silero латинские буквы не читает."""
+    def word(m: re.Match) -> str:
+        w = m.group(0).lower()
+        for k, v in LAT.items():
+            w = w.replace(k, v)
+        return "".join(LAT1.get(c, c) for c in w)
+
+    return re.sub(r"[A-Za-z]+", word, text)
+
+
 def clean(text: str) -> str:
     text = spell_numbers(text)
+    text = translit(text)
     text = text.replace("…", "...").replace("—", " - ").replace("–", " - ")
-    text = re.sub(r"[^\w\s.,!?;:()\-«»\"']", " ", text)
+    text = re.sub(r"[^А-Яа-яЁё\s.,!?;:()\-«»\"']", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -107,6 +132,24 @@ def sentences(text: str):
 
 
 def tts_piece(piece: str, speaker: str) -> np.ndarray:
+    """Озвучивает кусок; если Silero не справился — тишина вместо ошибки на весь фрагмент."""
+    if not CYR.search(piece):
+        return np.zeros(int(SAMPLE_RATE * 0.1), dtype=np.float32)
+    try:
+        return _apply(piece, speaker)
+    except Exception as e:
+        print(f"silero failed on {piece[:80]!r}: {e}", flush=True)
+    try:  # вторая попытка: только буквы и простая пунктуация
+        simple = re.sub(r"[^А-Яа-яЁё\s.,!?]", " ", piece)
+        simple = re.sub(r"\s+", " ", simple).strip()
+        if CYR.search(simple):
+            return _apply(simple, speaker)
+    except Exception as e:
+        print(f"silero failed again: {e}", flush=True)
+    return np.zeros(int(SAMPLE_RATE * 0.3), dtype=np.float32)
+
+
+def _apply(piece: str, speaker: str) -> np.ndarray:
     global ACCENT_ARGS
     with model_lock:
         try:
@@ -131,7 +174,7 @@ def synthesize_timed(raw: str, speaker: str):
     parts, timing, t = [], [], 0.0
     for s, e in sentences(raw):
         text = clean(raw[s:e])
-        if not re.search(r"[A-Za-zА-Яа-яЁё]", text):
+        if not CYR.search(text):
             continue
         audio = np.concatenate([tts_piece(p, speaker) for p in chunks(text)])
         dur = len(audio) / SAMPLE_RATE
@@ -190,7 +233,7 @@ def tts(req: TtsRequest, authorization: str = Header(default="")):
     if len(req.text) > 5000:
         raise HTTPException(status_code=413, detail="text too long")
 
-    key = hashlib.sha1(f"v2|{MODEL_ID}|{req.speaker}|{req.text}".encode()).hexdigest()
+    key = hashlib.sha1(f"v3|{MODEL_ID}|{req.speaker}|{req.text}".encode()).hexdigest()
     path = os.path.join(CACHE_DIR, key + ".ogg")
     meta = os.path.join(CACHE_DIR, key + ".json")
     if not (os.path.exists(path) and os.path.exists(meta)):
