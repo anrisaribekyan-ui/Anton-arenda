@@ -3,7 +3,9 @@
 POST /tts  {"text": "...", "speaker": "xenia"}  ->  audio/ogg (opus)
 Авторизация: заголовок  Authorization: Bearer <TTS_TOKEN>
 """
+import base64
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -18,7 +20,7 @@ from num2words import num2words
 from pydantic import BaseModel
 
 TOKEN = os.environ.get("TTS_TOKEN", "")
-MODEL_ID = os.environ.get("SILERO_MODEL", "v4_ru")
+MODEL_ID = os.environ.get("SILERO_MODEL", "v5_5_ru")
 CACHE_DIR = os.environ.get("CACHE_DIR", "/data/cache")
 CACHE_DAYS = float(os.environ.get("CACHE_DAYS", "14"))
 SAMPLE_RATE = 48000
@@ -87,22 +89,57 @@ def chunks(text: str, limit: int = 600):
     return out
 
 
-def synthesize(text: str, speaker: str) -> np.ndarray:
-    pause = np.zeros(int(SAMPLE_RATE * 0.25), dtype=np.float32)
-    parts = []
-    for piece in chunks(text):
-        if not re.search(r"[A-Za-zА-Яа-яЁё]", piece):
+SENTENCE_RE = re.compile(r"[^\n]+?(?:[.!?…]+[\"»”)']*(?=\s|$)|$)", re.M)
+
+
+def sentences(text: str):
+    """Предложения исходного текста с позициями: [(начало, конец), ...]."""
+    out = []
+    for m in SENTENCE_RE.finditer(text):
+        s, e = m.start(), m.end()
+        while s < e and text[s].isspace():
+            s += 1
+        while e > s and text[e - 1].isspace():
+            e -= 1
+        if e > s:
+            out.append((s, e))
+    return out
+
+
+def tts_piece(piece: str, speaker: str) -> np.ndarray:
+    global ACCENT_ARGS
+    with model_lock:
+        try:
+            audio = model.apply_tts(text=piece, speaker=speaker, sample_rate=SAMPLE_RATE, **ACCENT_ARGS)
+        except TypeError:
+            ACCENT_ARGS = {}  # новые модели сами ставят ударения и могут не знать этих параметров
+            audio = model.apply_tts(text=piece, speaker=speaker, sample_rate=SAMPLE_RATE)
+    return audio.numpy().astype(np.float32)
+
+
+ACCENT_ARGS = {"put_accent": True, "put_yo": True}
+SENTENCE_PAUSE = 0.18
+
+
+def synthesize_timed(raw: str, speaker: str):
+    """Озвучивает текст по предложениям.
+
+    Возвращает аудио и тайминги [[начало_символа, конец_символа, начало_сек, конец_сек], ...]
+    в координатах исходного текста — по ним приложение подсвечивает слова.
+    """
+    pause = np.zeros(int(SAMPLE_RATE * SENTENCE_PAUSE), dtype=np.float32)
+    parts, timing, t = [], [], 0.0
+    for s, e in sentences(raw):
+        text = clean(raw[s:e])
+        if not re.search(r"[A-Za-zА-Яа-яЁё]", text):
             continue
-        with model_lock:
-            audio = model.apply_tts(
-                text=piece,
-                speaker=speaker,
-                sample_rate=SAMPLE_RATE,
-                put_accent=True,
-                put_yo=True,
-            )
-        parts += [audio.numpy().astype(np.float32), pause]
-    return np.concatenate(parts) if parts else pause
+        audio = np.concatenate([tts_piece(p, speaker) for p in chunks(text)])
+        dur = len(audio) / SAMPLE_RATE
+        timing.append([s, e, round(t, 3), round(t + dur, 3)])
+        parts += [audio, pause]
+        t += dur + SENTENCE_PAUSE
+    audio = np.concatenate(parts) if parts else pause
+    return audio, timing
 
 
 def encode_opus(samples: np.ndarray, path: str) -> None:
@@ -112,8 +149,8 @@ def encode_opus(samples: np.ndarray, path: str) -> None:
         [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
             "-f", "s16le", "-ar", str(SAMPLE_RATE), "-ac", "1", "-i", "pipe:0",
-            "-ar", "24000", "-c:a", "libopus", "-b:a", "32k",
-            "-application", "voip", "-f", "ogg", tmp,
+            "-c:a", "libopus", "-b:a", "64k", "-application", "audio",
+            "-f", "ogg", tmp,
         ],
         input=pcm,
         capture_output=True,
@@ -153,12 +190,17 @@ def tts(req: TtsRequest, authorization: str = Header(default="")):
     if len(req.text) > 5000:
         raise HTTPException(status_code=413, detail="text too long")
 
-    text = clean(req.text)
-    key = hashlib.sha1(f"{MODEL_ID}|{req.speaker}|{text}".encode()).hexdigest()
+    key = hashlib.sha1(f"v2|{MODEL_ID}|{req.speaker}|{req.text}".encode()).hexdigest()
     path = os.path.join(CACHE_DIR, key + ".ogg")
-    if not os.path.exists(path):
+    meta = os.path.join(CACHE_DIR, key + ".json")
+    if not (os.path.exists(path) and os.path.exists(meta)):
         try:
-            encode_opus(synthesize(text, req.speaker), path)
+            audio, timing = synthesize_timed(req.text, req.speaker)
+            with open(meta, "w") as f:
+                json.dump(timing, f)
+            encode_opus(audio, path)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"tts failed: {e}")
-    return FileResponse(path, media_type="audio/ogg")
+    with open(meta) as f:
+        timing_b64 = base64.b64encode(f.read().encode()).decode()
+    return FileResponse(path, media_type="audio/ogg", headers={"X-Timing": timing_b64})

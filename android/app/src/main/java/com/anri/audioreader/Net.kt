@@ -1,5 +1,6 @@
 package com.anri.audioreader
 
+import android.util.Base64
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -17,6 +18,8 @@ private val http = OkHttpClient.Builder()
     .readTimeout(180, TimeUnit.SECONDS)
     .build()
 
+fun timingFileFor(audio: File) = File(audio.path.removeSuffix(".ogg") + ".json")
+
 object TtsClient {
     fun fetch(base: String, token: String, speaker: String, text: String, out: File) {
         if (base.isBlank()) throw IOException("в настройках не указан адрес сервера")
@@ -32,10 +35,28 @@ object TtsClient {
                 !r.isSuccessful -> throw IOException("сервер ответил ${r.code}")
             }
             out.parentFile?.mkdirs()
+            // Тайминги предложений для караоке-подсветки (новый сервер присылает их в заголовке)
+            r.header("X-Timing")?.let { b64 ->
+                runCatching {
+                    timingFileFor(out).writeText(String(Base64.decode(b64, Base64.DEFAULT), Charsets.UTF_8))
+                }
+            }
             val tmp = File(out.path + ".part")
             r.body!!.byteStream().use { input -> tmp.outputStream().use { input.copyTo(it) } }
             if (!tmp.renameTo(out)) throw IOException("не удалось сохранить аудио")
         }
+    }
+}
+
+/** Проверка сервера озвучки: возвращает имя модели или бросает понятную ошибку. */
+fun checkServer(base: String): String {
+    if (base.isBlank()) throw IOException("адрес не указан")
+    val req = Request.Builder().url(base.trimEnd('/') + "/health").get().build()
+    http.newCall(req).execute().use { r ->
+        if (!r.isSuccessful) throw IOException("сервер ответил ${r.code}")
+        val o = JSONObject(r.body!!.string())
+        if (!o.optBoolean("ok")) throw IOException("по этому адресу не сервер озвучки")
+        return o.optString("model", "?")
     }
 }
 

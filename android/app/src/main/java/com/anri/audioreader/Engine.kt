@@ -44,6 +44,7 @@ data class UiState(
 object Engine {
     private const val AHEAD = 4          // сколько фрагментов озвучивать заранее
     private const val KEEP_BEHIND = 10   // сколько прослушанных фрагментов хранить
+    private const val AUDIO_DIR = "audio2" // v2: новое качество и тайминги
 
     lateinit var app: Context
     lateinit var settings: Settings
@@ -63,6 +64,7 @@ object Engine {
     fun init(ctx: Context) {
         app = ctx.applicationContext
         settings = Settings(app)
+        Thread { File(app.cacheDir, "audio").deleteRecursively() }.start() // аудио старой версии
         player = ExoPlayer.Builder(app)
             .setAudioAttributes(
                 AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_SPEECH).build(),
@@ -99,10 +101,25 @@ object Engine {
 
     fun segmentText(i: Int): String = book?.segments?.getOrNull(i) ?: ""
 
+    /** Тайминги предложений фрагмента, если сервер их прислал. */
+    fun timing(i: Int): List<Sentence>? {
+        val b = book ?: return null
+        val f = timingFileFor(audioFile(b.id, i))
+        if (!f.exists()) return null
+        return runCatching { Karaoke.parse(f.readText()) }.getOrNull()
+    }
+
+    /** Позиция и длительность в секундах, если сейчас звучит именно этот фрагмент. */
+    fun position(i: Int): Pair<Float, Float>? {
+        if (player.currentMediaItem?.mediaId != i.toString()) return null
+        val d = player.duration
+        return player.currentPosition / 1000f to (if (d > 0) d / 1000f else -1f)
+    }
+
     private fun currentIndex(): Int =
         player.currentMediaItem?.mediaId?.toIntOrNull() ?: state.value.index
 
-    private fun audioFile(id: String, i: Int) = File(app.cacheDir, "audio/$id/${settings.speaker}/$i.ogg")
+    private fun audioFile(id: String, i: Int) = File(app.cacheDir, "$AUDIO_DIR/$id/${settings.speaker}/$i.ogg")
 
     // ---------- открытие и навигация ----------
 
@@ -126,7 +143,7 @@ object Engine {
             book = null
             state.value = UiState(speed = settings.speed)
         }
-        File(app.cacheDir, "audio/$id").deleteRecursively()
+        File(app.cacheDir, "$AUDIO_DIR/$id").deleteRecursively()
     }
 
     private fun startAt(i: Int, play: Boolean) {
@@ -184,7 +201,7 @@ object Engine {
     fun clearAudioCache() {
         val i = currentIndex()
         val playing = wantPlay
-        File(app.cacheDir, "audio").deleteRecursively()
+        File(app.cacheDir, AUDIO_DIR).deleteRecursively()
         if (book != null) startAt(i, playing)
     }
 
@@ -252,7 +269,7 @@ object Engine {
         val i = currentIndex()
         settings.setProgress(b.id, i)
         state.update { it.copy(index = i) }
-        audioFile(b.id, i - KEEP_BEHIND - 1).delete()
+        audioFile(b.id, i - KEEP_BEHIND - 1).let { it.delete(); timingFileFor(it).delete() }
         fill()
         maybeQuiz(i)
     }
